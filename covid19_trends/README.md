@@ -19,6 +19,24 @@ This project explores the **temporal and spatial impact of COVID-19** in the U.S
 
 ## 🔍 Reproducibility
 1️⃣ Clone this repository  
-2️⃣ Install required R packages using:
-   ```r
-   install.packages(c("tidyverse", "ggplot2", "sf", "tigris", "broom"))
+2️⃣ This analysis requires several R packages to be installed and loaded for proper execution. Before running the code, please ensure the following packages are installed on your system:
+`tidyverse`, `ggplot2`, `knitr`, `scales`, `tigris`, `sf`, `broom`.
+
+To check whether a package is installed, you can use the `require() function`. If the package is not installed, `require()` will return `FALSE`. You can then install the missing package using the `install.packages()` function.
+
+Here is a code snippet to automate this process. Copy and paste the code in the console to execute it:
+
+```{r, eval = FALSE}
+# required packages
+required_packages <- c("tidyverse", "ggplot2", "knitr", "scales", "tigris", "sf", "broom")
+
+# install missing packages
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# load all packages
+lapply(required_packages, library, character.only = TRUE)
+```
