@@ -1,0 +1,573 @@
+---
+title: "Understanding COVID-19: National Trends and Local Impact"
+author: "MSL"
+date: "2024-12-05"
+output: pdf_document
+---
+
+## Before you kint
+
+### Required Packages
+
+This analysis requires several R packages to be installed and loaded for proper execution. Before running the code, please ensure the following packages are installed on your system:
+`tidyverse`, `ggplot2`, `knitr`, `scales`, `tigris`, `sf`, `broom`.
+
+To check whether a package is installed, you can use the `require() function`. If the package is not installed, `require()` will return `FALSE`. You can then install the missing package using the `install.packages()` function.
+
+Here is a code snippet to automate this process. Copy and paste the code in the console to execute it
+
+```{r, eval = FALSE}
+
+## this chunk will not be executed when ran as part of this notebook
+## please run the code in your console to install these packages
+
+# required packages
+required_packages <- c("tidyverse", "ggplot2", "knitr", "scales", "tigris", "sf", "broom")
+
+# Install missing packages
+for (pkg in required_packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+  }
+}
+
+# Load all packages
+lapply(required_packages, library, character.only = TRUE)
+
+```
+
+### Note on Code Chunks
+
+For enhanced readability, the code chunks in this report have been hidden in the final output when the document is knit. While the underlying code is essential for data processing, analysis, and visualization, hiding the code allows the focus to remain on the findings and interpretations. Readers interested in the full code can refer to the source R Markdown file, which includes all the code necessary to reproduce this analysis. 
+This approach ensures a clean and professional presentation of the results while maintaining transparency and reproducibility.
+
+\newpage
+
+## Introduction
+
+The primary goal of this analysis is to explore the temporal and spatial patterns of COVID-19's impact in the United States, with a specific focus on the state of Oregon. At the national level, the analysis seeks to understand the progression of cases and deaths over time, examining trends in cumulative confirmed cases, cumulative deaths, and the death-to-case ratio. At the state level, the focus shifts to exploring disparities in lethality rates across Oregon's counties, with a particular interest in how these rates have evolved over time. The study also investigates whether the lethality rate in Multnomah County, Oregon's most populous county, has significantly declined since the launch of a large-scale immunization campaign in December 2020. This question of interest aims to evaluate the effectiveness of public health interventions and vaccination efforts in reducing the severity of outcomes during the pandemic.
+
+## About the Data
+
+This analysis utilizes two daily time series datasets tracking the progression of COVID-19 in the United States, reported at the county level. The datasets include `time_series_covid19_confirmed_US.csv`, which records confirmed cases, and `time_series_covid19_deaths_US.csv`, which captures reported deaths. Both datasets are structured to provide cumulative counts over time and are updated regularly to address any identified inaccuracies. These datasets offer a granular view of COVID-19 trends, enabling detailed analysis of regional impacts and temporal patterns.
+
+## Reshape and clean the data
+
+The datasets were transformed from a wide to a long format to facilitate analysis, with each row representing a unique county-date combination. Columns such as latitude and longitude were converted to numeric for geographic computations, while categorical variables, including country, state, and county identifiers, were recast as factors to streamline grouping and summarization. The date column was converted to a standard Date format, and rows with missing dates were removed to ensure temporal consistency. The FIPS code was ensured to be numeric, accounting for potential missing values, and negative values in the cases column were replaced with zeros to correct any data inconsistencies. These cleaning steps ensure the datasets are structured, accurate, and ready for analysis.
+
+Following these steps, both us_cases_clean and us_deaths_clean contain 3,819,906 rows and 14 columns. Geographic identifiers include UID, FIPS, and Combined_Key for unique record identification, while iso2, iso3, and code3 provide standardized country codes. Spatial attributes, such as Admin2 (county name), Province_State (state name), and Country_Region (set to "US"), are paired with latitude (Lat) and longitude (Long) for precise mapping. The date column records the daily timestamp, formatted as a standard Date, while the cases and deaths columns capture cumulative counts of confirmed cases or deaths, depending on the dataset.
+
+
+```{r packages, echo=FALSE, warning=FALSE, message=FALSE}
+
+## Load the necessary packages silently
+
+suppressPackageStartupMessages({
+  library(tidyverse)
+  library(ggplot2)
+  library(knitr)
+  library(scales)
+  library(tigris)
+  library(sf)
+  library(broom)
+})
+
+```
+
+
+```{r get the data, echo=FALSE, warning=FALSE, message=FALSE}
+
+## Load the data
+
+url_in<- 'https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/'
+file_names <- c('time_series_covid19_confirmed_US.csv', 
+                'time_series_covid19_deaths_US.csv')
+
+## concatinate the file names
+urls <- str_c(url_in, file_names)
+
+## load the US data
+
+us_cases<-read_csv(urls[1], show_col_types = FALSE)
+us_deaths<-read_csv(urls[2], show_col_types = FALSE)
+
+## load Oregon shapefile data
+
+oregon_shapefile <- suppressMessages(counties(state = "OR", year = 2020, class = "sf"))
+
+
+```
+
+
+```{r us_cases, echo=FALSE, warning=FALSE, message=FALSE}
+
+options(dplyr.summarise.inform = FALSE)
+
+### US Cases
+
+us_cases_long <- us_cases %>%
+  pivot_longer(
+    cols = -c(UID, iso2, iso3, code3, FIPS, Admin2,Province_State, 
+              Country_Region, Lat, Long_, Combined_Key),
+    names_to = 'date',
+    values_to = 'cases'
+  )
+
+## change column format where needed
+
+us_cases_clean <- us_cases_long %>%
+  mutate(
+    # Convert `date` to Date format
+    date = as.Date(date, format = "%m/%d/%y"),
+    
+    # Convert `Lat` and `Long_` to numeric
+    Lat = as.numeric(Lat),
+    Long = as.numeric(Long_),
+    
+    # Convert categorical columns to factors
+    iso2 = as.factor(iso2),
+    iso3 = as.factor(iso3),
+    Province_State = as.factor(Province_State),
+    Country_Region = as.factor(Country_Region),
+    Admin2 = as.factor(Admin2),
+    Combined_Key = as.factor(Combined_Key),
+    
+    # Ensure FIPS is numeric and handle NA
+    FIPS = as.numeric(FIPS),
+    
+    # Ensure `cases` remains numeric
+    cases = as.numeric(cases)
+  )  %>%
+    # Replace any negative cases
+    mutate(cases = ifelse(cases < 0, 0, cases))
+
+
+```
+
+
+```{r us_deaths, echo=FALSE, warning=FALSE, message=FALSE}
+
+options(dplyr.summarise.inform = FALSE)
+
+### US Deaths
+
+# Transform the dataset from wide to long format
+us_deaths_long <- us_deaths %>%
+  pivot_longer(
+    cols = -c(UID, iso2, iso3, code3, FIPS, Admin2, Province_State, 
+              Country_Region, Lat, Long_, Combined_Key),
+    names_to = 'date',
+    values_to = 'deaths'
+  )
+
+# Clean and format the dataset
+us_deaths_clean <- us_deaths_long %>%
+  mutate(
+    # Convert `date` to Date format
+    date = as.Date(date, format = "%m/%d/%y"),
+    
+    # Convert `Lat` and `Long_` to numeric
+    Lat = as.numeric(Lat),
+    Long = as.numeric(Long_),
+    
+    # Convert categorical columns to factors
+    iso2 = as.factor(iso2),
+    iso3 = as.factor(iso3),
+    Province_State = as.factor(Province_State),
+    Country_Region = as.factor(Country_Region),
+    Admin2 = as.factor(Admin2),
+    Combined_Key = as.factor(Combined_Key),
+    
+    # Ensure FIPS is numeric and handle NA
+    FIPS = as.numeric(FIPS),
+    
+    # Ensure `deaths` remains numeric
+    deaths = as.numeric(deaths)
+  ) %>%
+  # Replace any negative deaths with 0
+  mutate(deaths = ifelse(deaths < 0, 0, deaths)) %>%
+
+  # Remove rows where `date` is NA
+  filter(!is.na(date))
+
+```
+
+
+\newpage
+
+## Visualize the Data
+
+To understand the dynamics of COVID-19's progression and impact in the United States, this analysis presents two key levels of visualizations: national trends and state-specific insights for Oregon. At the national level, visualizations include trend analyses of cumulative confirmed cases, cumulative deaths, and death-to-case ratios over time, offering a long-term perspective on the pandemic's growth, its lethality, and its timeline. At the state level, a heatmap of Oregon highlights county-specific variations in lethality rates, providing insights into spatial disparities and the local impact of the pandemic. Oregon was chosen for this state-specific focus because it is where I currently reside, making it a region of personal and professional interest.
+
+Together, these visualizations reveal critical temporal and geographic patterns, shedding light on the scale and severity of the pandemic across the country and within Oregon. These findings provide valuable context for resource allocation, public health interventions, and policymaking, particularly in addressing healthcare disparities and improving outcomes during future public health crises.
+
+### National Level
+
+At the national level, the visualizations highlight the rapid and widespread progression of COVID-19 cases and deaths in the United States from 2020 to 2023. Cumulative confirmed cases surpassed 103.8 million by March 2023, with cumulative deaths exceeding 1.1 million. The death-to-case ratio, a measure of the virus's lethality, peaked at 100% during the pandemic's earliest days due to single case-death events, then stabilized to a median of 1.67% over time. 
+
+Key findings include sharp increases in both cases and deaths during late 2020 and mid-2021, corresponding to major waves of the pandemic that strained healthcare systems nationwide. Over time, declines in the death-to-case ratio reflect advancements in medical treatments, vaccination efforts, and public health measures, which collectively reduced the lethality of the virus. 
+
+These visualizations provide a comprehensive overview of the pandemic's scale and evolution, underscoring the importance of timely interventions, robust public health infrastructure, and continued monitoring to mitigate future health crises effectively.
+
+
+```{r viz data prep, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Summarize cumulative cases at the national level by date
+national_cases <- us_cases_clean %>%
+  group_by(date) %>%
+  summarise(cumulative_cases = sum(cases, na.rm = TRUE), .groups = "drop")
+
+
+# Summarize cumulative deaths at the national level by date
+national_deaths <- us_deaths_clean %>%
+  group_by(date) %>%
+  summarise(cumulative_deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+# Calculate the death-to-case ratio
+death_case_ratio <- national_cases %>%
+  inner_join(national_deaths, by = "date") %>%  # Combine cases and deaths data
+  mutate(death_case_ratio = cumulative_deaths / cumulative_cases)
+
+```
+
+
+```{r cumulative cases, echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center", fig.width=10}
+
+# Create a line plot
+ggplot(national_cases, aes(x = date, y = cumulative_cases)) +
+  geom_line(color = "black", size = 1) +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-6, suffix = "M")) +  # Format Y-axis
+  labs(
+    title = "Cumulative COVID-19 Cases in the US (2020-2023)",
+    subtitle = "Daily cumulative total of confirmed cases across all counties",
+    x = "",
+    y = "Cumulative Cases (Millions)",
+    caption = "Source: US COVID-19 Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    plot.caption = element_text(size = 10, hjust = 1, color = "gray40"),
+    axis.text = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 12, face = "bold", color = "gray30"),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+```
+
+
+```{r cumulative deaths, echo=FALSE, warning=FALSE, message=FALSE,fig.align = "center", fig.width=10}
+
+# Create a line plot
+ggplot(national_deaths, aes(x = date, y = cumulative_deaths)) +
+  geom_line(color = "black", size = 1) +
+  scale_y_continuous(labels = scales::label_number(scale = 1e-6, suffix = "M")) +  # Format Y-axis
+  labs(
+    title = "Cumulative COVID-19 Deaths in the US (2020-2023)",
+    subtitle = "Daily cumulative total of confirmed deaths across all counties",
+    x = "Date",
+    y = "Cumulative Deaths (Millions)",
+    caption = "Source: US COVID-19 Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    plot.caption = element_text(size = 10, hjust = 1, color = "gray40"),
+    axis.text = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 12, face = "bold", color = "gray30"),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+```
+
+
+```{r lethal cases, echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center", fig.width=10}
+
+# Create a line plot for death-to-case ratio
+ggplot(death_case_ratio, aes(x = date, y = death_case_ratio)) +
+  geom_line(color = "black", size = 1) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 0.1)) +  # Format Y-axis as percentages
+  labs(
+    title = "Death-to-Case Ratio of COVID-19 in the US (2020-2023)",
+    subtitle = "Daily cumulative ratio of deaths to confirmed cases across all counties",
+    x = "Date",
+    y = "Death-to-Case Ratio (%)",
+    caption = "Source: US COVID-19 Dataset"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    plot.caption = element_text(size = 10, hjust = 1, color = "gray40"),
+    axis.text = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 12, face = "bold", color = "gray30"),
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+```
+
+\newpage
+
+### State of Oregon
+
+The heatmap visualization of lethality rates (% deaths among confirmed cases) across Oregon counties from 2020 to 2023 reveals distinct spatial and temporal patterns. In 2020, counties such as Wallowa (3.67%), Wasco (2.86%), and Polk (2.55%) exhibited the highest lethality rates, likely reflecting the initial impact of the pandemic in rural areas with limited healthcare access. Over subsequent years, many counties experienced a general decline in lethality rates, with urban counties like Multnomah and Washington reporting significantly lower rates by 2023 (0.86% and 0.63%, respectively).
+
+Certain rural counties, including Harney (2.37%) and Josephine (2.08%), maintained elevated rates in 2021, suggesting ongoing challenges in these regions. By 2023, lethality rates had stabilized across much of the state, with counties like Lane (0.89%) and Deschutes (0.63%) achieving some of the lowest rates, indicative of effective public health measures and vaccine rollout efforts. However, counties such as Lake (2.01%) and Douglas (1.80%) continued to report higher lethality rates, underscoring the need for further investigation into underlying causes, including disparities in healthcare access and population vulnerabilities.
+
+The detailed summary by county can be found in the Appendix.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Step 1: Aggregate data for cases and deaths by county and year
+oregon_cases_by_year <- us_cases_clean %>%
+  filter(Province_State == "Oregon") %>%
+  filter(!Admin2 %in% c("Out of OR", "Unassigned")) %>%  # Remove unspecified counties
+  group_by(Admin2, year = year(date)) %>%
+  summarise(total_cases = sum(cases, na.rm = TRUE), .groups = "drop")
+
+oregon_deaths_by_year <- us_deaths_clean %>%
+  filter(Province_State == "Oregon") %>%
+  group_by(Admin2, year = year(date)) %>%
+  summarise(total_deaths = sum(deaths, na.rm = TRUE), .groups = "drop")
+
+# Step 2: Merge cases and deaths data
+oregon_lethal_by_year <- oregon_cases_by_year %>%
+  left_join(oregon_deaths_by_year, by = c("Admin2", "year")) %>%
+  mutate(
+    lethal_rate = ifelse(total_cases > 0, (total_deaths / total_cases) * 100, NA)
+  )
+
+# Step 3: Join with the shapefile
+oregon_map_data <- oregon_shapefile %>%
+  left_join(oregon_lethal_by_year, by = c("NAME" = "Admin2"))
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, fig.align = "center", fig.width=10}
+
+# Plot the heatmap
+
+ggplot(oregon_map_data) +
+  geom_sf(aes(fill = lethal_rate, geometry = geometry), color = "white", size = 0.2) +
+  facet_wrap(~ year) +
+  scale_fill_gradient(low = "white", high = "black", na.value = "lightblue", name = "Lethal Rate (%)") +
+  labs(
+    title = "Lethal Case Rate by County in Oregon",
+    subtitle = "Visualizing % of deaths among confirmed cases by year",
+    caption = "Source: COVID-19 Dataset",
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    plot.caption = element_text(size = 10, hjust = 1, color = "gray40"),
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(size = 12, face = "bold", color = "gray30"),
+    legend.position = "right",
+    legend.title = element_text(size = 12, face = "bold", color = "gray30"),
+    legend.text = element_text(size = 10, color = "gray30")
+  )
+
+
+```
+
+
+\newpage
+
+## Statistical Modeling: Lethality Rate in Multnomah County
+
+To assess whether there has been a statistically significant decline in the lethality rate (% of deaths among confirmed cases) in Multnomah County (Oregon's most populated county), we performed a linear regression analysis. The model examines the relationship between the lethality rate and the date, focusing on the period starting December 14, 2020. This date marks the launch of Oregon's large-scale immunization campaign, as healthcare facilities began receiving the Pfizer-BioNTech vaccine. By analyzing daily data points, we aim to determine if the lethality rate has significantly decreased over time, potentially reflecting the impact of vaccination efforts and other public health measures.
+
+The regression model reveals a clear and statistically significant decline in the lethality rate over time. The intercept of the model, estimated at 24.19, represents the lethality rate at the beginning of the analyzed period. This high initial value reflects the severity of outcomes during a time when vaccine coverage was minimal, and public health measures were still ramping up.
+
+The slope of the regression line, estimated at -0.0012, indicates that the lethality rate decreased by approximately 0.12 percentage points per day over the analyzed period. This decline is statistically significant, with a p-value of virtually zero, confirming that the downward trend is not due to random variation. The strong negative relationship between time (date) and lethality rate, evidenced by the high t-statistic (-78.56), highlights the robustness of this trend.
+
+These findings align with the timeline of increased vaccination coverage and improvements in COVID-19 treatment protocols. The results suggest that the state’s immunization campaign and other public health measures played a critical role in reducing the lethality rate over time. The consistent and substantial decline underscores the importance of vaccination efforts in mitigating the severity of COVID-19 and improving health outcomes in Multnomah County.
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Filter data for Multnomah County, starting from March 1, 2020
+multnomah_data <- us_cases_clean %>%
+  filter(Province_State == "Oregon", Admin2 == "Multnomah", date >= as.Date("2020-12-14")) %>%
+  inner_join(
+    us_deaths_clean %>%
+      filter(Province_State == "Oregon", Admin2 == "Multnomah", date >= as.Date("2020-12-14")),
+    by = c("date", "FIPS", "Admin2")
+  ) %>%
+  mutate(
+    lethal_rate = ifelse(cases > 0, (deaths / cases) * 100, NA)
+  ) %>%
+  filter(!is.na(lethal_rate))  # Remove rows with missing values
+
+# Fit a linear regression model
+lethal_rate_model <- lm(lethal_rate ~ date, data = multnomah_data)
+
+# Summarize the model
+model_summary <- summary(lethal_rate_model)
+
+# Display the results
+
+# Format the regression results
+tidy(lethal_rate_model) %>%
+  kable(
+    col.names = c("Term", "Estimate", "Std. Error", "t-Statistic", "p-Value"),
+    caption = "Regression Results for Lethality Rate in Multnomah County",
+    digits = 4,  # Set decimal places for numeric values
+    align = "c"  # Center-align columns
+  )
+
+```
+
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, , fig.align = "center", fig.width=10}
+
+ggplot(multnomah_data, aes(x = date, y = lethal_rate)) +
+  # Scatter plot for individual data points
+  geom_point(color = "black", alpha = 0.5, size = 1.5) +
+  # Smoothed trend line with confidence interval
+  geom_smooth(method = "lm", color = "gray30", fill = "gray70", 
+              se = TRUE, size = 1, alpha = 0.3) +
+  # Titles and labels
+  labs(
+    title = "Trend in Lethality Rate for Multnomah County (March 2020 - 2023)",
+    subtitle = "Linear regression of % deaths among confirmed cases by date",
+    x = NULL,
+    y = "Lethality Rate (%)",
+    caption = "Source: COVID-19 Dataset"
+  ) +
+  # Consistent minimal theme
+  theme_minimal(base_size = 14) + 
+  theme(
+    plot.title = element_text(face = "bold", size = 18, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    plot.caption = element_text(size = 10, hjust = 1, color = "gray40"),
+    axis.text = element_text(size = 12, color = "gray30"),
+    axis.title = element_text(size = 12, face = "bold", color = "gray30"),
+    panel.grid.major = element_line(color = "gray90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(20, 20, 20, 20)
+  ) +
+  # Adjust x-axis for readability
+  scale_x_date(
+    date_labels = "%Y", 
+    date_breaks = "1 year", 
+    expand = expansion(mult = c(0.01, 0.01))
+  ) +
+  # Adjust y-axis for clarity
+  scale_y_continuous(
+    expand = expansion(mult = c(0.01, 0.01))
+  )
+
+```
+
+\newpage
+
+## Conclusion and Discussion
+
+This analysis provides an exploratory examination of COVID-19's progression and impact at both the national and state levels, with a specific focus on Oregon. At the national level, the trends reveal the scale and severity of the pandemic, with over 103.8 million cumulative cases and 1.1 million deaths by March 2023. The decline in the death-to-case ratio over time underscores the critical role of advancements in treatments, public health interventions, and vaccination campaigns in mitigating the lethality of the virus.
+In Oregon, spatial analysis highlighted significant disparities in lethality rates between urban and rural counties, with rural areas facing persistent challenges due to limited healthcare access and other factors. The regression analysis for Multnomah County demonstrated a statistically significant decline in lethality rates following the initiation of mass immunization efforts, reflecting the potential positive impact of public health measures.
+
+These findings emphasize the importance of timely and sustained public health efforts in controlling pandemics and reducing mortality. While vaccination campaigns and healthcare advancements significantly lowered lethality rates, the disparities observed across counties highlight the need for targeted interventions, particularly in underserved rural areas. 
+The analysis also underscores the importance of robust and accurate data collection to inform decision-making during public health crises. However, limitations such as data and model biases must be acknowledged. These biases remind us to interpret the results cautiously and to complement statistical findings with qualitative insights. This study provides valuable lessons for future public health responses, emphasizing the need for equitable healthcare access and ongoing monitoring to ensure effective management of health crises.
+
+### Potential Sources of Bias
+
+1. **Data Bias**:
+
+- The datasets rely on reported cases and deaths, which may underrepresent the true impact of COVID-19 due to underreporting or discrepancies in data collection methods. Factors such as limited testing capacity during early pandemic stages and variations in state and county reporting practices could influence the accuracy of the data.
+- Missing data, particularly in rural areas, may disproportionately affect insights into counties with limited healthcare infrastructure, skewing lethality rate estimates.
+- Cumulative data may fail to capture nuanced shifts, such as sudden surges or drops in cases and deaths, potentially smoothing over important short-term trends.
+
+2. **Model Bias**:
+
+- The linear regression model assumes a consistent, linear relationship between time and the lethality rate, which may oversimplify non-linear dynamics, such as abrupt changes due to policy interventions or new COVID-19 variants.
+- The focus on a single explanatory variable (date) omits other potential contributors to lethality trends, such as vaccination rates, healthcare capacity, or demographic shifts.
+- Excluding data prior to December 14, 2020, provides a cleaner analysis focused on the vaccination era but may introduce bias by omitting early pandemic dynamics.
+
+3. **Analyst Bias**:
+
+- The choice to focus on Multnomah County may reflect personal interest but excludes broader state-level variations that could offer more comprehensive insights.
+- Emphasis on visualizations and temporal patterns may have overlooked the role of socioeconomic or policy-driven factors influencing outcomes.
+- Interpretation of statistical significance, while data-driven, might downplay potential confounding factors not accounted for in the model.
+
+
+### Mitigation of Bias
+
+1. **Data Validation**
+
+Efforts were made to clean and preprocess the data, including handling missing values, correcting anomalies, and ensuring consistency in variable formats. These steps aim to reduce inaccuracies that could distort findings.
+
+2. **Robust Analytical Approach**
+
+Multiple visualization techniques were employed, such as line charts, regression analysis, and heatmaps, to provide diverse perspectives on the data. Using different methods ensures a more comprehensive understanding and minimizes reliance on a single analytical framework.
+
+3. **Transparency of Assumptions**
+
+The limitations of the linear regression model and the cumulative dataset are explicitly acknowledged to avoid overstating causal inferences. Additionally, the analysis emphasizes exploratory findings and does not assert definitive conclusions about the impact of specific interventions.
+
+
+\newpage
+
+# Appendix
+
+```{r session info}
+
+sessionInfo()
+
+```
+
+\newpage
+
+## % of Deaths Among Confirmed Cases by County and Year in Oregon
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+oregon_lethality_table <- oregon_lethal_by_year %>%
+  filter(!Admin2 %in% c("Out of OR", "Unassigned")) %>%  # Exclude unwanted counties
+  select(Admin2, year, total_cases, total_deaths) %>%    # Keep relevant columns
+  mutate(
+    lethality_rate = ifelse(total_cases > 0, (total_deaths / total_cases) * 100, NA)  # Calculate lethality rate
+  ) %>%
+  select(Admin2, year, lethality_rate)  # Keep only necessary columns
+
+# Step 2: Pivot wider for county-year format
+oregon_lethality_table <- oregon_lethality_table %>%
+  pivot_wider(
+    names_from = year,
+    values_from = lethality_rate
+  ) %>%
+  arrange(Admin2)
+
+# Display the table
+kable(
+  oregon_lethality_table,
+  col.names = c("County", unique(oregon_lethal_by_year$year)),
+  caption = "% of Deaths Among Confirmed Cases by County and Year in Oregon",
+  digits = 2
+)
+
+```
+
+
+\newpage
+
+## References
+
+1. Johns Hopkins University Center for Systems Science and Engineering (JHU CSSE). COVID-19 Data Repository. Available at: [https://github.com/CSSEGISandData/COVID-19](https://github.com/CSSEGISandData/COVID-19).
+
+2. Wickham, H. et al. (2019). *ggplot2: Create Elegant Data Visualisations Using the Grammar of Graphics*. R package version 3.3.3. Available at: [https://ggplot2.tidyverse.org](https://ggplot2.tidyverse.org).
+
+3. Pebesma, E. (2018). *Simple Features for R: Standardized Support for Spatial Vector Data*. *The R Journal*, 10(1), 439-446. Available at: [https://r-spatial.github.io/sf](https://r-spatial.github.io/sf).
+
+4. Centers for Disease Control and Prevention (CDC). COVID-19 Data Tracker. Available at: [https://covid.cdc.gov/covid-data-tracker](https://covid.cdc.gov/covid-data-tracker).
+
+5. Oregon Health Authority. COVID-19 in Oregon: Data and Trends. Available at: [https://www.oregon.gov/oha](https://www.oregon.gov/oha).
+
+
